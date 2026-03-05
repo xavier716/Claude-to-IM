@@ -1,5 +1,7 @@
 # Claude-to-IM
 
+English | [中文](README.zh-CN.md)
+
 Claude-to-IM is a host-agnostic bridge library that connects [Claude Code SDK](https://docs.anthropic.com/en/docs/claude-code/sdk) to IM platforms, allowing users to interact with Claude through Telegram, Discord, and Feishu (Lark).
 
 This library handles all IM-side complexity — message routing, streaming previews, permission approval flows, Markdown rendering, chunking, retry, rate limiting — while delegating persistence, LLM calls, and permission resolution to the host application through a set of dependency injection interfaces.

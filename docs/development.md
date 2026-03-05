@@ -1,5 +1,7 @@
 # Development Guide
 
+English | [中文](development.zh-CN.md)
+
 This document covers everything you need to integrate Claude-to-IM into your own application: host interface specifications, SSE stream format, step-by-step integration walkthrough, adapter development, and troubleshooting.
 
 ## Table of Contents
