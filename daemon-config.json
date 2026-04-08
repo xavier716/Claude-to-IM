@@ -1,0 +1,33 @@
+{
+  "system": {
+    "name": "claude-to-im-daemon",
+    "version": "1.0.0",
+    "autoRestart": true,
+    "watch": false
+  },
+  "logging": {
+    "level": "info",
+    "maxFiles": 10,
+    "maxSize": "10M",
+    "retention": "7d"
+  },
+  "healthCheck": {
+    "enabled": true,
+    "interval": 30000,
+    "timeout": 5000,
+    "failureThreshold": 3
+  },
+  "performance": {
+    "pollingInterval": {
+      "weixin": 3000,
+      "feishu": 0
+    },
+    "maxQueueSize": 100,
+    "concurrentMessages": 5
+  },
+  "recovery": {
+    "maxRetries": 5,
+    "retryDelay": 5000,
+    "backoffMultiplier": 2
+  }
+}
