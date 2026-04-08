@@ -8,11 +8,11 @@ timeout /t 2 /nobreak >nul
 REM Start daemon with Claude Code path and Git Bash path
 cd /d "%~dp0"
 echo Starting Claude-to-IM daemon...
-echo Using Claude Code: C:\Users\DXJJ\.vscode\extensions\anthropic.claude-code-2.1.92-win32-x64\resources\native-binary\claude.exe
+echo Using Claude Code: C:\Users\DXJJ\.vscode\extensions\anthropic.claude-code-2.1.94-win32-x64\resources\native-binary\claude.exe
 echo Using Git Bash: C:\Git\bin\bash.exe
 
 REM Set environment variables for current session and pass to node
-set "CTI_CLAUDE_CODE_EXECUTABLE=C:\Users\DXJJ\.vscode\extensions\anthropic.claude-code-2.1.92-win32-x64\resources\native-binary\claude.exe"
+set "CTI_CLAUDE_CODE_EXECUTABLE=C:\Users\DXJJ\.vscode\extensions\anthropic.claude-code-2.1.94-win32-x64\resources\native-binary\claude.exe"
 set "CLAUDE_CODE_GIT_BASH_PATH=C:\Git\bin\bash.exe"
 
 REM Start node with environment variables (use cmd /c to ensure vars are inherited)

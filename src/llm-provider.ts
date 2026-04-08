@@ -276,6 +276,41 @@ function findAllInPath(): string[] {
 }
 
 /**
+ * Find Claude Code executable in VSCode extensions directory (Windows only).
+ * Returns the path if found, undefined otherwise.
+ */
+function findVSCodeExtension(): string | undefined {
+  if (process.platform !== 'win32') return undefined;
+
+  const home = process.env.USERPROFILE || process.env.HOME;
+  if (!home) return undefined;
+
+  const extensionsDir = `${home}\\.vscode\\extensions`;
+  try {
+    // Check if directory exists
+    if (!fs.existsSync(extensionsDir)) return undefined;
+
+    // Read all directories matching anthropic.claude-code-*
+    const entries = fs.readdirSync(extensionsDir, { withFileTypes: true });
+    const claudeDirs = entries
+      .filter(d => d.isDirectory() && d.name.startsWith('anthropic.claude-code-'))
+      .map(d => d.name)
+      .sort() // Sort to get the latest version last
+      .reverse(); // Reverse to get the latest version first
+
+    for (const dir of claudeDirs) {
+      const exePath = `${extensionsDir}\\${dir}\\resources\\native-binary\\claude.exe`;
+      if (fs.existsSync(exePath)) {
+        return exePath;
+      }
+    }
+  } catch {
+    // Ignore errors (directory doesn't exist, permission issues, etc.)
+  }
+  return undefined;
+}
+
+/**
  * Resolve the path to the `claude` CLI executable.
  *
  * Priority:
@@ -294,11 +329,11 @@ export function resolveClaudeCliPath(): string | undefined {
   // 2. Gather all candidates
   const isWindows = process.platform === 'win32';
   const pathCandidates = findAllInPath();
-  const wellKnown = isWindows
+  const wellKnown: string[] = isWindows
     ? [
         process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Programs\\claude\\claude.exe` : '',
         'C:\\Program Files\\claude\\claude.exe',
-      ].filter(Boolean)
+      ]
     : [
         `${process.env.HOME}/.claude/local/claude`,
         `${process.env.HOME}/.local/bin/claude`,
@@ -306,6 +341,12 @@ export function resolveClaudeCliPath(): string | undefined {
         '/opt/homebrew/bin/claude',
         `${process.env.HOME}/.npm-global/bin/claude`,
       ];
+
+  // Add VSCode extension path if on Windows
+  const vscodePath = findVSCodeExtension();
+  if (vscodePath) {
+    wellKnown.unshift(vscodePath); // Add to the front for priority
+  }
 
   // Deduplicate while preserving order
   const seen = new Set<string>();
