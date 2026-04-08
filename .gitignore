@@ -3,3 +3,8 @@ dist/
 *.tgz
 .env
 config.env
+*.log
+weixin-login.html
+serve-weixin*.cjs
+serve-weixin*.js
+scripts/weixin-simple-login.cjs
