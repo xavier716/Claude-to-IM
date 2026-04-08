@@ -1,0 +1,371 @@
+/**
+ * Conversation Engine — processes inbound IM messages through Claude.
+ *
+ * Takes a ChannelBinding + inbound message, calls the LLM provider,
+ * consumes the SSE stream server-side, saves messages to DB,
+ * and returns the response text for delivery.
+ */
+import fs from 'fs';
+import path from 'path';
+import { getBridgeContext } from './context.js';
+import crypto from 'crypto';
+/**
+ * Process an inbound message: send to Claude, consume the response stream,
+ * save to DB, and return the result.
+ */
+export async function processMessage(binding, text, onPermissionRequest, abortSignal, files, onPartialText, onToolEvent) {
+    const { store, llm } = getBridgeContext();
+    const sessionId = binding.codepilotSessionId;
+    // Acquire session lock
+    const lockId = crypto.randomBytes(8).toString('hex');
+    const lockAcquired = store.acquireSessionLock(sessionId, lockId, `bridge-${binding.channelType}`, 600);
+    if (!lockAcquired) {
+        return {
+            responseText: '',
+            tokenUsage: null,
+            hasError: true,
+            errorMessage: 'Session is busy processing another request',
+            permissionRequests: [],
+            sdkSessionId: null,
+        };
+    }
+    store.setSessionRuntimeStatus(sessionId, 'running');
+    // Lock renewal interval
+    const renewalInterval = setInterval(() => {
+        try {
+            store.renewSessionLock(sessionId, lockId, 600);
+        }
+        catch { /* best effort */ }
+    }, 60_000);
+    try {
+        // Resolve session early — needed for workingDirectory and provider resolution
+        const session = store.getSession(sessionId);
+        // Save user message — persist file attachments to disk using the same
+        // <!--files:JSON--> format as the desktop chat route, so the UI can render them.
+        let savedContent = text;
+        if (files && files.length > 0) {
+            const workDir = binding.workingDirectory || session?.working_directory || '';
+            if (workDir) {
+                try {
+                    const uploadDir = path.join(workDir, '.codepilot-uploads');
+                    if (!fs.existsSync(uploadDir)) {
+                        fs.mkdirSync(uploadDir, { recursive: true });
+                    }
+                    const fileMeta = files.map((f) => {
+                        const safeName = path.basename(f.name).replace(/[^a-zA-Z0-9._-]/g, '_');
+                        const filePath = path.join(uploadDir, `${Date.now()}-${safeName}`);
+                        const buffer = Buffer.from(f.data, 'base64');
+                        fs.writeFileSync(filePath, buffer);
+                        return { id: f.id, name: f.name, type: f.type, size: buffer.length, filePath };
+                    });
+                    savedContent = `<!--files:${JSON.stringify(fileMeta)}-->${text}`;
+                }
+                catch (err) {
+                    console.warn('[conversation-engine] Failed to persist file attachments:', err instanceof Error ? err.message : err);
+                    savedContent = `[${files.length} image(s) attached] ${text}`;
+                }
+            }
+            else {
+                savedContent = `[${files.length} image(s) attached] ${text}`;
+            }
+        }
+        store.addMessage(sessionId, 'user', savedContent);
+        // Resolve provider
+        let resolvedProvider;
+        const providerId = session?.provider_id || '';
+        if (providerId && providerId !== 'env') {
+            resolvedProvider = store.getProvider(providerId);
+        }
+        if (!resolvedProvider) {
+            const defaultId = store.getDefaultProviderId();
+            if (defaultId)
+                resolvedProvider = store.getProvider(defaultId);
+        }
+        // Effective model
+        const effectiveModel = binding.model || session?.model || store.getSetting('default_model') || undefined;
+        // Permission mode from binding mode
+        let permissionMode;
+        switch (binding.mode) {
+            case 'plan':
+                permissionMode = 'plan';
+                break;
+            case 'ask':
+                permissionMode = 'default';
+                break;
+            default:
+                permissionMode = 'acceptEdits';
+                break;
+        }
+        // Load conversation history for context
+        const { messages: recentMsgs } = store.getMessages(sessionId, { limit: 50 });
+        const historyMsgs = recentMsgs.slice(0, -1).map(m => ({
+            role: m.role,
+            content: m.content,
+        }));
+        const abortController = new AbortController();
+        if (abortSignal) {
+            if (abortSignal.aborted) {
+                abortController.abort();
+            }
+            else {
+                abortSignal.addEventListener('abort', () => abortController.abort(), { once: true });
+            }
+        }
+        const stream = llm.streamChat({
+            prompt: text,
+            sessionId,
+            sdkSessionId: binding.sdkSessionId || undefined,
+            model: effectiveModel,
+            systemPrompt: session?.system_prompt || undefined,
+            workingDirectory: binding.workingDirectory || session?.working_directory || undefined,
+            abortController,
+            permissionMode,
+            provider: resolvedProvider,
+            conversationHistory: historyMsgs,
+            files,
+            onRuntimeStatusChange: (status) => {
+                try {
+                    store.setSessionRuntimeStatus(sessionId, status);
+                }
+                catch { /* best effort */ }
+            },
+        });
+        // Consume the stream server-side (replicate collectStreamResponse pattern).
+        // Permission requests are forwarded immediately via the callback during streaming
+        // because the stream blocks until permission is resolved — we can't wait until after.
+        return await consumeStream(stream, sessionId, onPermissionRequest, onPartialText, onToolEvent);
+    }
+    finally {
+        clearInterval(renewalInterval);
+        store.releaseSessionLock(sessionId, lockId);
+        store.setSessionRuntimeStatus(sessionId, 'idle');
+    }
+}
+/**
+ * Consume an SSE stream and extract response data.
+ * Mirrors the collectStreamResponse() logic from chat/route.ts.
+ */
+async function consumeStream(stream, sessionId, onPermissionRequest, onPartialText, onToolEvent) {
+    const { store } = getBridgeContext();
+    const reader = stream.getReader();
+    const contentBlocks = [];
+    let currentText = '';
+    /** Monotonically accumulated text for streaming preview — never resets on tool_use. */
+    let previewText = '';
+    let tokenUsage = null;
+    let hasError = false;
+    let errorMessage = '';
+    const seenToolResultIds = new Set();
+    const permissionRequests = [];
+    let capturedSdkSessionId = null;
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done)
+                break;
+            const lines = value.split('\n');
+            for (const line of lines) {
+                if (!line.startsWith('data: '))
+                    continue;
+                let event;
+                try {
+                    event = JSON.parse(line.slice(6));
+                }
+                catch {
+                    continue;
+                }
+                switch (event.type) {
+                    case 'text':
+                        currentText += event.data;
+                        if (onPartialText) {
+                            previewText += event.data;
+                            try {
+                                onPartialText(previewText);
+                            }
+                            catch { /* non-critical */ }
+                        }
+                        break;
+                    case 'tool_use': {
+                        if (currentText.trim()) {
+                            contentBlocks.push({ type: 'text', text: currentText });
+                            currentText = '';
+                        }
+                        try {
+                            const toolData = JSON.parse(event.data);
+                            contentBlocks.push({
+                                type: 'tool_use',
+                                id: toolData.id,
+                                name: toolData.name,
+                                input: toolData.input,
+                            });
+                            if (onToolEvent) {
+                                try {
+                                    onToolEvent(toolData.id, toolData.name, 'running');
+                                }
+                                catch { /* non-critical */ }
+                            }
+                        }
+                        catch { /* skip */ }
+                        break;
+                    }
+                    case 'tool_result': {
+                        try {
+                            const resultData = JSON.parse(event.data);
+                            const newBlock = {
+                                type: 'tool_result',
+                                tool_use_id: resultData.tool_use_id,
+                                content: resultData.content,
+                                is_error: resultData.is_error || false,
+                            };
+                            if (seenToolResultIds.has(resultData.tool_use_id)) {
+                                const idx = contentBlocks.findIndex((b) => b.type === 'tool_result' && 'tool_use_id' in b && b.tool_use_id === resultData.tool_use_id);
+                                if (idx >= 0)
+                                    contentBlocks[idx] = newBlock;
+                            }
+                            else {
+                                seenToolResultIds.add(resultData.tool_use_id);
+                                contentBlocks.push(newBlock);
+                            }
+                            if (onToolEvent) {
+                                try {
+                                    onToolEvent(resultData.tool_use_id, '', // name not available in tool_result, adapter tracks by id
+                                    resultData.is_error ? 'error' : 'complete');
+                                }
+                                catch { /* non-critical */ }
+                            }
+                        }
+                        catch { /* skip */ }
+                        break;
+                    }
+                    case 'permission_request': {
+                        try {
+                            const permData = JSON.parse(event.data);
+                            const perm = {
+                                permissionRequestId: permData.permissionRequestId,
+                                toolName: permData.toolName,
+                                toolInput: permData.toolInput,
+                                suggestions: permData.suggestions,
+                            };
+                            permissionRequests.push(perm);
+                            // Forward immediately — the stream blocks until the permission is
+                            // resolved, so we must send the IM prompt *now*, not after the stream ends.
+                            if (onPermissionRequest) {
+                                onPermissionRequest(perm).catch((err) => {
+                                    console.error('[conversation-engine] Failed to forward permission request:', err);
+                                });
+                            }
+                        }
+                        catch { /* skip */ }
+                        break;
+                    }
+                    case 'status': {
+                        try {
+                            const statusData = JSON.parse(event.data);
+                            if (statusData.session_id) {
+                                capturedSdkSessionId = statusData.session_id;
+                                store.updateSdkSessionId(sessionId, statusData.session_id);
+                            }
+                            if (statusData.model) {
+                                store.updateSessionModel(sessionId, statusData.model);
+                            }
+                        }
+                        catch { /* skip */ }
+                        break;
+                    }
+                    case 'task_update': {
+                        try {
+                            const taskData = JSON.parse(event.data);
+                            if (taskData.session_id && taskData.todos) {
+                                store.syncSdkTasks(taskData.session_id, taskData.todos);
+                            }
+                        }
+                        catch { /* skip */ }
+                        break;
+                    }
+                    case 'error':
+                        hasError = true;
+                        errorMessage = event.data || 'Unknown error';
+                        break;
+                    case 'result': {
+                        try {
+                            const resultData = JSON.parse(event.data);
+                            if (resultData.usage)
+                                tokenUsage = resultData.usage;
+                            if (resultData.is_error)
+                                hasError = true;
+                            if (resultData.session_id) {
+                                capturedSdkSessionId = resultData.session_id;
+                                store.updateSdkSessionId(sessionId, resultData.session_id);
+                            }
+                        }
+                        catch { /* skip */ }
+                        break;
+                    }
+                    // tool_output, tool_timeout, mode_changed, done — ignored for bridge
+                }
+            }
+        }
+        // Flush remaining text
+        if (currentText.trim()) {
+            contentBlocks.push({ type: 'text', text: currentText });
+        }
+        // Save assistant message
+        if (contentBlocks.length > 0) {
+            const hasToolBlocks = contentBlocks.some((b) => b.type === 'tool_use' || b.type === 'tool_result');
+            const content = hasToolBlocks
+                ? JSON.stringify(contentBlocks)
+                : contentBlocks
+                    .filter((b) => b.type === 'text')
+                    .map((b) => b.text)
+                    .join('\n\n')
+                    .trim();
+            if (content) {
+                store.addMessage(sessionId, 'assistant', content, tokenUsage ? JSON.stringify(tokenUsage) : null);
+            }
+        }
+        // Extract text-only response for IM delivery
+        const responseText = contentBlocks
+            .filter((b) => b.type === 'text')
+            .map((b) => b.text)
+            .join('')
+            .trim();
+        return {
+            responseText,
+            tokenUsage,
+            hasError,
+            errorMessage,
+            permissionRequests,
+            sdkSessionId: capturedSdkSessionId,
+        };
+    }
+    catch (e) {
+        // Best-effort save on stream error
+        if (currentText.trim()) {
+            contentBlocks.push({ type: 'text', text: currentText });
+        }
+        if (contentBlocks.length > 0) {
+            const hasToolBlocks = contentBlocks.some((b) => b.type === 'tool_use' || b.type === 'tool_result');
+            const content = hasToolBlocks
+                ? JSON.stringify(contentBlocks)
+                : contentBlocks
+                    .filter((b) => b.type === 'text')
+                    .map((b) => b.text)
+                    .join('\n\n')
+                    .trim();
+            if (content) {
+                store.addMessage(sessionId, 'assistant', content);
+            }
+        }
+        const isAbort = e instanceof DOMException && e.name === 'AbortError'
+            || e instanceof Error && e.name === 'AbortError';
+        return {
+            responseText: '',
+            tokenUsage,
+            hasError: true,
+            errorMessage: isAbort ? 'Task stopped by user' : (e instanceof Error ? e.message : 'Stream consumption error'),
+            permissionRequests,
+            sdkSessionId: capturedSdkSessionId,
+        };
+    }
+}
+//# sourceMappingURL=conversation-engine.js.map
