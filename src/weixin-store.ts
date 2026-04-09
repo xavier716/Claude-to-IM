@@ -54,13 +54,19 @@ function normalizeAccounts(accounts: WeixinAccountRecord[]): {
   accounts: WeixinAccountRecord[];
   removedAccountIds: string[];
 } {
-  // Single-account mode: the newest linked account wins and older records
-  // are treated as replaceable history.
-  if (accounts.length <= 1) {
-    return { accounts, removedAccountIds: [] };
+  // Multi-account mode: keep all enabled accounts
+  // Filter out disabled accounts and sort by recency
+  const enabledAccounts = accounts.filter((account) => account.enabled);
+
+  if (enabledAccounts.length <= 1) {
+    return { accounts: enabledAccounts, removedAccountIds: [] };
   }
 
-  const sorted = [...accounts].sort((a, b) => {
+  const disabledAccountIds = accounts
+    .filter((account) => !account.enabled)
+    .map((account) => account.accountId);
+
+  const sorted = [...enabledAccounts].sort((a, b) => {
     const recencyDiff = getAccountRecency(b).localeCompare(getAccountRecency(a));
     if (recencyDiff !== 0) return recencyDiff;
 
@@ -73,19 +79,9 @@ function normalizeAccounts(accounts: WeixinAccountRecord[]): {
     return 0;
   });
 
-  const kept = sorted[0];
-  const removedAccountIds = [
-    ...new Set(
-      sorted
-        .slice(1)
-        .map((account) => account.accountId)
-        .filter((accountId) => accountId !== kept.accountId),
-    ),
-  ];
-
   return {
-    accounts: [kept],
-    removedAccountIds,
+    accounts: sorted,
+    removedAccountIds: disabledAccountIds,
   };
 }
 

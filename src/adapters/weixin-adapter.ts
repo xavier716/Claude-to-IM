@@ -67,7 +67,8 @@ export class WeixinAdapter extends BaseChannelAdapter {
     }
 
     if (linkedAccounts.length > 0) {
-      console.log(`[weixin-adapter] Started in single-account mode with ${linkedAccounts[0].accountId}`);
+      const mode = linkedAccounts.length === 1 ? 'single-account mode' : 'multi-account mode';
+      console.log(`[weixin-adapter] Started in ${mode} with ${linkedAccounts.length} account(s): ${linkedAccounts.map(a => a.accountId).join(', ')}`);
     }
   }
 
