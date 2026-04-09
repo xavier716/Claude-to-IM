@@ -1,33 +1,33 @@
 @echo off
-REM 卸载 Claude-to-IM 开机自动启动
+REM Uninstall Claude-to-IM auto-start
 
 setlocal enabledelayedexpansion
 
 set "TASK_NAME=Claude-to-IM-Daemon"
 
 echo ============================================
-echo Claude-to-IM 开机自动启动卸载
+echo Claude-to-IM Auto-start Uninstall
 echo ============================================
 echo.
 
-REM 检查管理员权限
+REM Check admin privileges
 net session >nul 2>&1
 if %errorLevel% neq 0 (
-    echo [!] 需要管理员权限
-    echo [*] 请右键点击此文件，选择"以管理员身份运行"
+    echo [!] Admin privileges required
+    echo [*] Right-click this file and select "Run as administrator"
     echo.
     pause
     exit /b 1
 )
 
-REM 删除任务计划
-echo [*] 删除任务计划...
+REM Remove scheduled task
+echo [*] Removing scheduled task...
 schtasks /Delete /TN "%TASK_NAME%" /F >nul 2>&1
 
 if %errorLevel% EQU 0 (
-    echo [✓] 任务计划已删除
+    echo [OK] Scheduled task removed
 ) else (
-    echo [!] 任务计划不存在或删除失败
+    echo [!] Task does not exist or removal failed
 )
 
 echo.

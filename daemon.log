@@ -1,0 +1,16 @@
+[claude-to-im] Using Claude Code from: C:\Users\DXJJ\.vscode\extensions\anthropic.claude-code-2.1.96-win32-x64\resources\native-binary\claude.exe
+[claude-to-im] Using Git Bash from: C:\Git\bin\bash.exe
+[info]: [ 'client ready' ]
+[info]: [ 'event-dispatch is ready' ]
+[info]: [
+  '[ws]',
+  'receive events or callbacks through persistent connection only available in self-build & Feishu app, Configured in:\n' +
+    '        Developer Console(开发者后台) \n' +
+    '          ->\n' +
+    '        Events and Callbacks(事件与回调)\n' +
+    '          -> \n' +
+    '        Mode of event/callback subscription(订阅方式)\n' +
+    '          -> \n' +
+    '        Receive events/callbacks through persistent connection(使用 长连接 接收事件/回调)'
+]
+[info]: [ '[ws]', 'ws client ready' ]

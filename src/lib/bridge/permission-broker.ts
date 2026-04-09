@@ -15,6 +15,10 @@ import type { BaseChannelAdapter } from './channel-adapter.js';
 import { deliver } from './delivery-layer.js';
 import { getBridgeContext } from './context.js';
 import { escapeHtml } from './adapters/telegram-utils.js';
+import {
+  setPermissionTimeout,
+  clearPermissionTimeout,
+} from './permission-timeout.js';
 
 /**
  * Dedup recent permission forwards to prevent duplicate cards.
@@ -117,6 +121,16 @@ export async function forwardPermissionRequest(
     result = await deliver(adapter, message, { sessionId });
   }
 
+  // Set timeout to auto-deny if user doesn't respond (prevents deadlock)
+  if (result.ok) {
+    setPermissionTimeout(
+      permissionRequestId,
+      adapter.channelType,
+      address.chatId,
+      toolName,
+    );
+  }
+
   // Record the link so we can match callback queries back to this permission
   if (result.ok && result.messageId) {
     try {
@@ -177,8 +191,13 @@ export function handlePermissionCallback(
   // Dedup: reject if already resolved (fast path before expensive resolution)
   if (link.resolved) {
     console.warn(`[permission-broker] Permission ${permissionRequestId} already resolved`);
+    // Clear timeout even if already resolved (defensive)
+    clearPermissionTimeout(permissionRequestId);
     return false;
   }
+
+  // Clear the timeout since user is responding now
+  clearPermissionTimeout(permissionRequestId);
 
   // Atomically mark as resolved BEFORE calling resolvePendingPermission
   // to prevent race conditions with concurrent button clicks

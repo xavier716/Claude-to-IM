@@ -314,19 +314,45 @@ function findVSCodeExtension(): string | undefined {
  * Resolve the path to the `claude` CLI executable.
  *
  * Priority:
- *   1. CTI_CLAUDE_CODE_EXECUTABLE env var (explicit override)
+ *   1. CTI_CLAUDE_CODE_EXECUTABLE env var (explicit override) - FAILS if invalid
  *   2. All `claude` executables in PATH — pick first compatible (>= 2.x)
  *   3. Common install locations — pick first compatible (>= 2.x)
  *
- * This multi-candidate approach handles the common scenario where
- * nvm/npm puts an old 1.x claude in PATH before the native 2.x CLI.
+ * IMPORTANT: If CTI_CLAUDE_CODE_EXECUTABLE is set, we FAIL FAST if the path is invalid.
+ * This prevents silent fallbacks to wrong Claude Code installations.
  */
 export function resolveClaudeCliPath(): string | undefined {
-  // 1. Explicit env var — trust the user
+  // 1. Explicit env var — STRICT validation, fail fast if invalid
   const fromEnv = process.env.CTI_CLAUDE_CODE_EXECUTABLE;
-  if (fromEnv && isExecutable(fromEnv)) return fromEnv;
+  if (fromEnv) {
+    if (!isExecutable(fromEnv)) {
+      throw new Error(
+        `Claude Code native binary not found at: ${fromEnv}\n` +
+        `The file does not exist or is not executable.\n` +
+        `Fix: Either:\n` +
+        `  1. Install Claude Code at the configured path, OR\n` +
+        `  2. Update CTI_CLAUDE_CODE_EXECUTABLE in ~/.claude-to-im/config.env to the correct path\n` +
+        `  3. Unset CTI_CLAUDE_CODE_EXECUTABLE to use auto-detection`
+      );
+    }
+    // Check compatibility but don't fallback on old version - fail with clear message
+    const compat = checkCliCompatibility(fromEnv);
+    if (compat?.compatible) {
+      console.log(`[llm-provider] Using configured Claude Code: ${fromEnv} (${compat.version})`);
+      return fromEnv;
+    }
+    if (compat) {
+      throw new Error(
+        `Claude Code at ${fromEnv} is version ${compat.version}, but version ${MIN_CLI_MAJOR}.x or higher is required.\n` +
+        `Fix: Update Claude Code to the latest version or remove CTI_CLAUDE_CODE_EXECUTABLE to use auto-detection`
+      );
+    }
+    // isExecutable passed but compatibility check failed - might still work
+    console.warn(`[llm-provider] Could not verify Claude Code version at ${fromEnv}, using it anyway (isExecutable=true)`);
+    return fromEnv;
+  }
 
-  // 2. Gather all candidates
+  // 2. Gather all candidates (only if no explicit env var)
   const isWindows = process.platform === 'win32';
   const pathCandidates = findAllInPath();
   const wellKnown: string[] = isWindows

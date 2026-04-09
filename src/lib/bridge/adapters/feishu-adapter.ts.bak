@@ -121,243 +121,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
   /** In-flight card creation promises per chatId — prevents duplicate creation. */
   private cardCreatePromises = new Map<string, Promise<boolean>>();
 
-  /** Tenant access token cache for CardKit HTTP API calls. */
-  private tenantAccessToken: string | null = null;
-  private tokenExpiresAt: number = 0;
-
-  // ── CardKit HTTP API Helpers ───────────────────────────────────
-
-  /**
-   * Get a cached tenant access token, refreshing if expired.
-   * CardKit APIs require tenant_access_token for authentication.
-   */
-  private async getTenantAccessToken(): Promise<string | null> {
-    // Return cached token if still valid (5 min buffer)
-    if (this.tenantAccessToken && Date.now() < this.tokenExpiresAt - 300000) {
-      return this.tenantAccessToken;
-    }
-
-    const appId = getBridgeContext().store.getSetting('bridge_feishu_app_id') || '';
-    const appSecret = getBridgeContext().store.getSetting('bridge_feishu_app_secret') || '';
-    const domainSetting = getBridgeContext().store.getSetting('bridge_feishu_domain') || 'feishu';
-    const baseUrl = domainSetting === 'lark'
-      ? 'https://open.larksuite.com'
-      : 'https://open.feishu.cn';
-
-    try {
-      const tokenRes = await fetch(`${baseUrl}/open-apis/auth/v3/tenant_access_token/internal`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      const tokenData: any = await tokenRes.json();
-      if (tokenData.tenant_access_token) {
-        this.tenantAccessToken = tokenData.tenant_access_token;
-        this.tokenExpiresAt = Date.now() + (tokenData.expire || 7200) * 1000;
-        return this.tenantAccessToken;
-      }
-      console.warn('[feishu-adapter] Failed to get tenant access token:', tokenData);
-      return null;
-    } catch (err) {
-      console.warn('[feishu-adapter] Tenant access token request failed:', err instanceof Error ? err.message : err);
-      return null;
-    }
-  }
-
-  /**
-   * Create a CardKit v2 card via HTTP API.
-   * POST /open-apis/cardkit/v1/cards
-   */
-  private async cardKitCreateCard(cardBody: Record<string, unknown>): Promise<string | null> {
-    const token = await this.getTenantAccessToken();
-    if (!token) return null;
-
-    const domainSetting = getBridgeContext().store.getSetting('bridge_feishu_domain') || 'feishu';
-    const baseUrl = domainSetting === 'lark'
-      ? 'https://open.larksuite.com'
-      : 'https://open.feishu.cn';
-
-    try {
-      const res = await fetch(`${baseUrl}/open-apis/cardkit/v1/cards`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          type: 'card_json',
-          data: JSON.stringify(cardBody),
-        }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      const data: any = await res.json();
-      if (data.code === 0 && data.data?.card_id) {
-        return data.data.card_id;
-      }
-      console.warn('[feishu-adapter] CardKit create card failed:', data);
-      return null;
-    } catch (err) {
-      console.warn('[feishu-adapter] CardKit create card request failed:', err instanceof Error ? err.message : err);
-      return null;
-    }
-  }
-
-  /**
-   * Update a card message via Feishu Message API.
-   * PATCH /open-apis/im/v1/messages/{message_id}
-   *
-   * This is the correct API for updating card content during streaming.
-   * The CardKit-specific endpoints don't exist; we use the standard message update API.
-   */
-  private async cardKitStreamContent(messageId: string, content: string, sequence: number): Promise<boolean> {
-    const token = await this.getTenantAccessToken();
-    if (!token) return false;
-
-    const domainSetting = getBridgeContext().store.getSetting('bridge_feishu_domain') || 'feishu';
-    const baseUrl = domainSetting === 'lark'
-      ? 'https://open.larksuite.com'
-      : 'https://open.feishu.cn';
-
-    try {
-      // Build a streaming card with the current content
-      const streamingCard = {
-        config: { wide_screen_mode: true },
-        header: {
-          template: process.env.FEISHU_CARD_TEMPLATE || 'turquoise',
-          title: { content: '💭 Thinking...', tag: 'plain_text' }
-        },
-        elements: [
-          {
-            tag: 'div',
-            text: {
-              tag: 'lark_md',
-              content: content || '...'
-            }
-          },
-          {
-            tag: 'hr'
-          },
-          {
-            tag: 'div',
-            text: {
-              tag: 'plain_text',
-              content: `⏳ Stream sequence: ${sequence} • ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`
-            }
-          }
-        ]
-      };
-
-      const res = await fetch(`${baseUrl}/open-apis/im/v1/messages/${messageId}`, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          msg_type: 'interactive',
-          update_key: '', // Required for card updates, can be empty for initial updates
-          content: JSON.stringify(streamingCard),
-        }),
-        signal: AbortSignal.timeout(10_000),
-      });
-
-      // Log response details for debugging
-      const responseText = await res.text();
-      if (!res.ok) {
-        console.error('[feishu-adapter] Card stream update API error:', res.status, res.statusText);
-        console.error('[feishu-adapter] Response body:', responseText.substring(0, 500));
-        return false;
-      }
-
-      try {
-        const data = JSON.parse(responseText);
-        if (data.code !== 0) {
-          console.error('[feishu-adapter] Card stream update returned error code:', data.code, 'msg:', data.msg);
-          return false;
-        }
-        return true;
-      } catch (parseErr) {
-        console.error('[feishu-adapter] Failed to parse card stream update response:', parseErr instanceof Error ? parseErr.message : parseErr);
-        console.error('[feishu-adapter] Response was:', responseText.substring(0, 200));
-        return false;
-      }
-    } catch (err) {
-      console.warn('[feishu-adapter] Card stream update request failed:', err instanceof Error ? err.message : err);
-      return false;
-    }
-  }
-
-  /**
-   * Set streaming mode placeholder - No longer needed with the new API approach.
-   * The streaming state is managed by updating card content, not via a separate mode.
-   *
-   * @deprecated Streaming mode is not supported by Feishu Message API.
-   *             Card updates happen via PATCH /im/v1/messages/{message_id}
-   */
-  private async cardKitSetStreamingMode(messageId: string, streamingMode: boolean, sequence: number): Promise<boolean> {
-    // No-op: The streaming mode concept doesn't exist in Feishu Message API
-    // We just return true to allow the flow to continue
-    console.log(`[feishu-adapter] cardKitSetStreamingMode called (streamingMode=${streamingMode}, seq=${sequence}) - no-op with new API`);
-    return true;
-  }
-
-  /**
-   * Finalize a card message via Feishu Message API.
-   * PATCH /open-apis/im/v1/messages/{message_id}
-   *
-   * Updates the card with its final content after streaming completes.
-   */
-  private async cardKitUpdateCard(messageId: string, cardJson: string, sequence: number): Promise<boolean> {
-    const token = await this.getTenantAccessToken();
-    if (!token) return false;
-
-    const domainSetting = getBridgeContext().store.getSetting('bridge_feishu_domain') || 'feishu';
-    const baseUrl = domainSetting === 'lark'
-      ? 'https://open.larksuite.com'
-      : 'https://open.feishu.cn';
-
-    try {
-      const res = await fetch(`${baseUrl}/open-apis/im/v1/messages/${messageId}`, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          msg_type: 'interactive',
-          update_key: '',
-          content: cardJson,
-        }),
-        signal: AbortSignal.timeout(10_000),
-      });
-
-      // Log response details for debugging
-      const responseText = await res.text();
-      if (!res.ok) {
-        console.error('[feishu-adapter] Card finalize API error:', res.status, res.statusText);
-        console.error('[feishu-adapter] Response body:', responseText.substring(0, 500));
-        return false;
-      }
-
-      try {
-        const data = JSON.parse(responseText);
-        if (data.code !== 0) {
-          console.error('[feishu-adapter] Card finalize returned error code:', data.code, 'msg:', data.msg);
-          return false;
-        }
-        return true;
-      } catch (parseErr) {
-        console.error('[feishu-adapter] Failed to parse card finalize response:', parseErr instanceof Error ? parseErr.message : parseErr);
-        console.error('[feishu-adapter] Response was:', responseText.substring(0, 200));
-        return false;
-      }
-    } catch (err) {
-      console.warn('[feishu-adapter] Card finalize request failed:', err instanceof Error ? err.message : err);
-      return false;
-    }
-  }
-
   // ── Lifecycle ───────────────────────────────────────────────
 
   async start(): Promise<void> {
@@ -630,7 +393,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
         },
       };
 
-      const cardId = await this.cardKitCreateCard(cardBody);
+      const createResp = await (this.restClient as any).cardkit.v2.card.create({
+        data: { type: 'card_json', data: JSON.stringify(cardBody) },
+      });
+      const cardId = createResp?.data?.card_id;
       if (!cardId) {
         console.warn('[feishu-adapter] Card create returned no card_id');
         return false;
@@ -726,10 +492,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     state.sequence++;
     const seq = state.sequence;
-    const messageId = state.messageId;
+    const cardId = state.cardId;
 
     // Fire-and-forget — streaming updates are non-critical
-    this.cardKitStreamContent(messageId, content, seq).then(() => {
+    (this.restClient as any).cardkit.v2.card.streamContent({
+      path: { card_id: cardId },
+      data: { content, sequence: seq },
+    }).then(() => {
       state.lastUpdateAt = Date.now();
     }).catch((err: unknown) => {
       console.warn('[feishu-adapter] streamContent failed:', err instanceof Error ? err.message : err);
@@ -771,9 +540,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
 
     try {
-      // Step 1: Close streaming mode (no-op with new API)
+      // Step 1: Close streaming mode
       state.sequence++;
-      await this.cardKitSetStreamingMode(state.messageId, false, state.sequence);
+      await (this.restClient as any).cardkit.v2.card.settings.streamingMode.set({
+        path: { card_id: state.cardId },
+        data: { streaming_mode: false, sequence: state.sequence },
+      });
 
       // Step 2: Build and apply final card
       const statusLabels: Record<string, string> = {
@@ -790,9 +562,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const finalCardJson = buildFinalCardJson(responseText, state.toolCalls, footer);
 
       state.sequence++;
-      await this.cardKitUpdateCard(state.messageId, finalCardJson, state.sequence);
+      await (this.restClient as any).cardkit.v2.card.update({
+        path: { card_id: state.cardId },
+        data: { type: 'card_json', data: finalCardJson, sequence: state.sequence },
+      });
 
-      console.log(`[feishu-adapter] Card finalized: messageId=${state.messageId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);
+      console.log(`[feishu-adapter] Card finalized: cardId=${state.cardId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);
       return true;
     } catch (err) {
       console.warn('[feishu-adapter] Card finalize failed:', err instanceof Error ? err.message : err);
