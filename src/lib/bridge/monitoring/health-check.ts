@@ -89,13 +89,17 @@ export class HealthChecker {
    */
   getMetrics(): MetricsData {
     const { store } = getBridgeContext();
+    const s = store as unknown as {
+      getMetric?: (k: string) => number | undefined;
+      getActiveSessionIds?: () => string[];
+    };
 
     // Get message counts from store
-    const messagesSent = store.getMetric?.('messages_sent') || 0;
-    const messagesReceived = store.getMetric?.('messages_received') || 0;
-    const errors = store.getMetric?.('errors') || 0;
-    const avgResponseTime = store.getMetric?.('avg_response_time') || 0;
-    const activeSessions = store.getActiveSessionIds?.().length || 0;
+    const messagesSent = s.getMetric?.('messages_sent') || 0;
+    const messagesReceived = s.getMetric?.('messages_received') || 0;
+    const errors = s.getMetric?.('errors') || 0;
+    const avgResponseTime = s.getMetric?.('avg_response_time') || 0;
+    const activeSessions = s.getActiveSessionIds?.().length || 0;
 
     return {
       messagesSent: Number(messagesSent),
@@ -115,7 +119,11 @@ export const healthChecker = new HealthChecker();
  * Setup health checks for all adapters.
  */
 export function setupAdapterHealthChecks(): void {
-  const { bridgeManager } = getBridgeContext();
+  // bridgeManager is a module-level singleton imported elsewhere; this
+  // function is invoked from main.ts after the bridge manager is wired up.
+  // We grab it via the global context for symmetry with other modules.
+  const ctx = getBridgeContext() as unknown as { bridgeManager?: { getAdapters?: () => Array<{ channelType: string; isRunning?: () => boolean }> } };
+  const bridgeManager = ctx.bridgeManager;
 
   if (!bridgeManager) {
     console.warn('[health-check] Bridge manager not available');

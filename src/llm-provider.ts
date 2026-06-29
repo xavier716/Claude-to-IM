@@ -585,8 +585,66 @@ export class SDKLLMProvider implements LLMProvider {
               options: queryOptions as Parameters<typeof query>[0]['options'],
             });
 
-            for await (const msg of q) {
-              handleMessage(msg, controller, state);
+            // Layer 1: dual heartbeat — track BOTH "no message at all" and
+            // "no text produced" stalls. Without this, SDK can yield status
+            // events that look alive but never produce output.
+            const IDLE_TIMEOUT_MS = Number(process.env.CTI_LLM_IDLE_TIMEOUT_MS) || 60_000;
+            const NO_TEXT_TIMEOUT_MS = Number(process.env.CTI_LLM_NO_TEXT_TIMEOUT_MS) || 90_000;
+            const IDLE_TICK_MS = 15_000;
+            let lastMsgAt = Date.now();
+            let lastTextAt = Date.now();
+            const idleWatcher = setInterval(() => {
+              const idleMs = Date.now() - lastMsgAt;
+              const noTextMs = Date.now() - lastTextAt;
+              if (noTextMs >= NO_TEXT_TIMEOUT_MS) {
+                console.error(`[llm-provider] No-text timeout (${noTextMs}ms; msg-idle=${idleMs}ms), aborting SDK query`);
+                params.abortController?.abort(new Error(`LLM no-text timeout ${noTextMs}ms`));
+              } else if (idleMs >= IDLE_TIMEOUT_MS) {
+                console.error(`[llm-provider] Idle timeout (${idleMs}ms), aborting SDK query`);
+                params.abortController?.abort(new Error(`LLM idle timeout ${idleMs}ms`));
+              }
+            }, IDLE_TICK_MS);
+
+            // Layer 2: hard deadline via Promise.race — guarantees termination
+            // even if the SDK ignores the abort signal.
+            const DEADLINE_MS = Number(process.env.CTI_LLM_TURN_TIMEOUT_MS) || 300_000;
+            const deadline = new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error(`LLM turn deadline ${DEADLINE_MS}ms exceeded`)), DEADLINE_MS);
+            });
+
+            // Layer 3: nuclear fallback. If the SDK subprocess ignores abort()
+            // (real failure mode on Windows where native binaries sit in
+            // uninterruptible I/O), SIGKILL the daemon; supervisor restarts.
+            const HARD_KILL_GRACE_MS = 5_000;
+            const hardKillTimer = setTimeout(() => {
+              console.error(
+                `[llm-provider] HARD KILL: no response within ${DEADLINE_MS + HARD_KILL_GRACE_MS}ms. ` +
+                `Aborting daemon; supervisor will restart.`,
+              );
+              process.kill(process.pid, 'SIGKILL');
+            }, DEADLINE_MS + HARD_KILL_GRACE_MS);
+            hardKillTimer.unref();
+
+            try {
+              await Promise.race([
+                (async () => {
+                  for await (const msg of q) {
+                    lastMsgAt = Date.now();
+                    handleMessage(msg, controller, state);
+                    if (msg && typeof msg === 'object' && 'type' in msg) {
+                      const t = (msg as { type: string }).type;
+                      if (t === 'stream_event' || t === 'assistant' || t === 'content_block_delta') {
+                        lastTextAt = Date.now();
+                      }
+                    }
+                  }
+                })(),
+                deadline,
+              ]);
+              controller.close();
+            } finally {
+              clearInterval(idleWatcher);
+              clearTimeout(hardKillTimer);
             }
 
             controller.close();

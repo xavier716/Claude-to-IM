@@ -12,10 +12,10 @@
 
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { initBridgeContext } from '../../lib/bridge/context';
-import * as router from '../../lib/bridge/channel-router';
-import type { BridgeStore, LLMProvider, PermissionGateway, LifecycleHooks } from '../../lib/bridge/host';
-import type { ChannelBinding } from '../../lib/bridge/types';
+import { initBridgeContext } from '../../lib/bridge/context.js';
+import * as router from '../../lib/bridge/channel-router.js';
+import type { BridgeStore, LLMProvider, PermissionGateway, LifecycleHooks } from '../../lib/bridge/host.js';
+import type { ChannelBinding } from '../../lib/bridge/types.js';
 
 // ── Mock Store ──────────────────────────────────────────────
 

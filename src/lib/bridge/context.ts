@@ -33,6 +33,18 @@ export function initBridgeContext(ctx: BridgeContext): void {
 }
 
 /**
+ * Hot-swap the LLM provider (for `!codex` / `!claude` runtime switching
+ * without restarting the daemon). Mutates the singleton in place so all
+ * subsequent `getBridgeContext().llm.streamChat()` calls hit the new provider.
+ */
+export function setLLMProvider(newLLM: LLMProvider): LLMProvider | undefined {
+  const ctx = getBridgeContext();
+  const prev = ctx.llm;
+  ctx.llm = newLLM;
+  return prev;
+}
+
+/**
  * Get the current bridge context.
  * Throws if the context has not been initialized.
  */

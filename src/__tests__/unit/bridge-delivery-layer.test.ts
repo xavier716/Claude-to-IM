@@ -11,11 +11,11 @@
 
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { initBridgeContext } from '../../lib/bridge/context';
-import { deliver } from '../../lib/bridge/delivery-layer';
-import type { BaseChannelAdapter } from '../../lib/bridge/channel-adapter';
-import type { BridgeStore, LLMProvider, PermissionGateway, LifecycleHooks } from '../../lib/bridge/host';
-import type { OutboundMessage, SendResult } from '../../lib/bridge/types';
+import { initBridgeContext } from '../../lib/bridge/context.js';
+import { deliver } from '../../lib/bridge/delivery-layer.js';
+import type { BaseChannelAdapter } from '../../lib/bridge/channel-adapter.js';
+import type { BridgeStore, LLMProvider, PermissionGateway, LifecycleHooks } from '../../lib/bridge/host.js';
+import type { OutboundMessage, SendResult } from '../../lib/bridge/types.js';
 
 // ── Mock Adapter ────────────────────────────────────────────
 

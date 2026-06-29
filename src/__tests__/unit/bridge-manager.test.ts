@@ -10,8 +10,8 @@
 
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { initBridgeContext } from '../../lib/bridge/context';
-import type { BridgeStore, LifecycleHooks } from '../../lib/bridge/host';
+import { initBridgeContext } from '../../lib/bridge/context.js';
+import type { BridgeStore, LifecycleHooks } from '../../lib/bridge/host.js';
 
 // ── Test the session lock mechanism directly ────────────────
 // We test the processWithSessionLock pattern by extracting its logic.
@@ -126,7 +126,7 @@ describe('bridge-manager lifecycle', () => {
     });
 
     // Import dynamically to get fresh module state
-    const { getStatus } = await import('../../lib/bridge/bridge-manager');
+    const { getStatus } = await import('../../lib/bridge/bridge-manager.js');
     const status = getStatus();
     assert.equal(status.running, false);
     assert.equal(status.adapters.length, 0);

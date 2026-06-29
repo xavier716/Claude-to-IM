@@ -9,9 +9,9 @@
 
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { initBridgeContext } from '../../lib/bridge/context';
-import { handlePermissionCallback } from '../../lib/bridge/permission-broker';
-import type { BridgeStore, PermissionGateway, PermissionResolution } from '../../lib/bridge/host';
+import { initBridgeContext } from '../../lib/bridge/context.js';
+import { handlePermissionCallback } from '../../lib/bridge/permission-broker.js';
+import type { BridgeStore, PermissionGateway, PermissionResolution } from '../../lib/bridge/host.js';
 
 // ── Mock Store ──────────────────────────────────────────────
 

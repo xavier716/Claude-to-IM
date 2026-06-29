@@ -99,7 +99,7 @@ export class CardKitApiClient {
         return null;
       }
 
-      const data: CardCreateResponse = await res.json();
+      const data = (await res.json()) as CardCreateResponse;
       if (data.code !== 0) {
         console.error('[cardkit-api] Create card returned error code:', data.code, 'msg:', data.msg);
         return null;

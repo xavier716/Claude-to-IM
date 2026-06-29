@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Feishu (Lark) Adapter — implements BaseChannelAdapter for Feishu Bot API.
  *
  * Uses the official @larksuiteoapi/node-sdk WSClient for real-time event
@@ -36,6 +36,7 @@ import {
   buildStreamingContent,
   buildFinalCardJson,
   buildPermissionButtonCard,
+  buildStreamingCardJson,
   formatElapsed,
 } from '../markdown/feishu.js';
 
@@ -110,6 +111,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
   private restClient: lark.Client | null = null;
   private seenMessageIds = new Map<string, boolean>();
   private botOpenId: string | null = null;
+  /**
+   * Which bridge this is — 'codex' or 'claude'. Auto-derived from the running
+   * skill path (skills/Claude-to-IM-codex vs skills/Claude-to-IM) at startup,
+   * used by the /codex /claude command-prefix router.
+   */
+  private botKind: 'codex' | 'claude' | null = null;
   /** All known bot IDs (open_id, user_id, union_id) for mention matching. */
   private botIds = new Set<string>();
   /** Track last incoming message ID per chat for typing indicator. */
@@ -117,6 +124,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
   /** Track active typing reaction IDs per chat for cleanup. */
   private typingReactions = new Map<string, string>();
   /** Active streaming card state per chatId. */
+  // POLL-FALLBACK: workaround for WS event subscription not delivering
+  // im.message.receive_v1. Tracks chats to poll and a windowed start time.
+  private pollFallbackTimer: NodeJS.Timeout | null = null;
+  private pollFallbackChats: string[] = [];
+  private pollFallbackLastTsMs: number = Date.now() - 5 * 60 * 1000;
+
   private activeCards = new Map<string, FeishuCardState>();
   /** In-flight card creation promises per chatId — prevents duplicate creation. */
   private cardCreatePromises = new Map<string, Promise<boolean>>();
@@ -219,35 +232,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
       ? 'https://open.larksuite.com'
       : 'https://open.feishu.cn';
 
-    try {
-      // Build a streaming card with the current content
-      const streamingCard = {
-        config: { wide_screen_mode: true },
-        header: {
-          template: process.env.FEISHU_CARD_TEMPLATE || 'turquoise',
-          title: { content: '💭 Thinking...', tag: 'plain_text' }
-        },
-        elements: [
-          {
-            tag: 'div',
-            text: {
-              tag: 'lark_md',
-              content: content || '...'
-            }
-          },
-          {
-            tag: 'hr'
-          },
-          {
-            tag: 'div',
-            text: {
-              tag: 'plain_text',
-              content: `⏳ Stream sequence: ${sequence} • ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`
-            }
-          }
-        ]
-      };
+    // Build v2 schema card body. MUST match the schema of the card created
+    // by cardKitCreateCard (also v2) - otherwise Feishu returns
+    // "schemaV2 card can not change schemaV1" (200830).
+    const cardJson = buildStreamingCardJson(content, [], sequence);
 
+    try {
       const res = await fetch(`${baseUrl}/open-apis/im/v1/messages/${messageId}`, {
         method: 'PATCH',
         headers: {
@@ -256,13 +246,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
         },
         body: JSON.stringify({
           msg_type: 'interactive',
-          update_key: '', // Required for card updates, can be empty for initial updates
-          content: JSON.stringify(streamingCard),
+          update_key: '',
+          content: cardJson,
         }),
         signal: AbortSignal.timeout(10_000),
       });
 
-      // Log response details for debugging
       const responseText = await res.text();
       if (!res.ok) {
         console.error('[feishu-adapter] Card stream update API error:', res.status, res.statusText);
@@ -317,6 +306,17 @@ export class FeishuAdapter extends BaseChannelAdapter {
       ? 'https://open.larksuite.com'
       : 'https://open.feishu.cn';
 
+    // cardJson is the v2 schema string from buildFinalCardJson. We need to
+    // strip streaming_mode from its config so the final card stops streaming.
+    let finalContent = cardJson;
+    try {
+      const parsed = JSON.parse(cardJson);
+      if (parsed && parsed.config) {
+        delete parsed.config.streaming_mode;
+        finalContent = JSON.stringify(parsed);
+      }
+    } catch { /* keep original if parse fails */ }
+
     try {
       const res = await fetch(`${baseUrl}/open-apis/im/v1/messages/${messageId}`, {
         method: 'PATCH',
@@ -327,12 +327,11 @@ export class FeishuAdapter extends BaseChannelAdapter {
         body: JSON.stringify({
           msg_type: 'interactive',
           update_key: '',
-          content: cardJson,
+          content: finalContent,
         }),
         signal: AbortSignal.timeout(10_000),
       });
 
-      // Log response details for debugging
       const responseText = await res.text();
       if (!res.ok) {
         console.error('[feishu-adapter] Card finalize API error:', res.status, res.statusText);
@@ -346,6 +345,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           console.error('[feishu-adapter] Card finalize returned error code:', data.code, 'msg:', data.msg);
           return false;
         }
+        console.log(`[feishu-adapter] Card finalized: messageId=${messageId}, status=ok, sequence=${sequence}`);
         return true;
       } catch (parseErr) {
         console.error('[feishu-adapter] Failed to parse card finalize response:', parseErr instanceof Error ? parseErr.message : parseErr);
@@ -429,12 +429,21 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
     this.wsClient.start({ eventDispatcher: dispatcher });
 
+    // Start POLL-FALLBACK (workaround for WS event subscription issues)
+    this.startPollFallback();
+
+    // Install ws-frame hook for diagnostic logging of all incoming WS frames
+    setTimeout(() => { this.installWsFrameHook(); }, 2000);
+
     console.log('[feishu-adapter] Started (botOpenId:', this.botOpenId || 'unknown', ')');
   }
 
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
+
+    // Stop POLL-FALLBACK
+    this.stopPollFallback();
 
     // Close WebSocket connection (SDK exposes close())
     if (this.wsClient) {
@@ -1184,9 +1193,21 @@ export class FeishuAdapter extends BaseChannelAdapter {
         }
       }
 
-      // Require @mention check
-      const requireMention = getBridgeContext().store.getSetting('bridge_feishu_require_mention') !== 'false';
-      if (requireMention && !this.isBotMentioned(msg.mentions)) {
+      // Mention policy:
+      //   - default ('auto'): every group message reaches the bot; another bot
+      //     in the same group will receive the same message from Feishu and
+      //     reply in parallel, so the user can have a multi-bot conversation
+      //     without typing @ for each one.
+      //   - 'true':  require explicit @mention (legacy behaviour, opt-in)
+      //   - 'false': alias of 'auto' (kept for backward compat)
+      // Either way, a `/codex ...` or `/claude ...` command prefix is treated
+      // as addressing THIS bot, so the OTHER bot can stay quiet when the
+      // user clearly wants a single-bot reply.
+      const requireMentionSetting = getBridgeContext().store.getSetting('bridge_feishu_require_mention');
+      const requireMention = requireMentionSetting === 'true';
+      const isAddressedByPrefix = this.isAddressedByCommandPrefix(msg);
+      const mentionedAtAll = this.isBotMentioned(msg.mentions) || isAddressedByPrefix;
+      if (requireMention && !mentionedAtAll) {
         console.log('[feishu-adapter] Group message ignored (bot not @mentioned), chatId:', chatId, 'msgId:', msg.message_id);
         try {
           getBridgeContext().store.insertAuditLog({
@@ -1434,6 +1455,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
         this.botOpenId = botData.bot.open_id;
         this.botIds.add(botData.bot.open_id);
       }
+      // Auto-detect bridge kind from running skill path so /codex and /claude
+      // command prefixes can be routed correctly per-process.
+      if (!this.botKind) {
+        try {
+          const skillPath = process.argv[1] || '';
+          if (skillPath.includes('Claude-to-IM-codex')) this.botKind = 'codex';
+          else if (skillPath.includes('Claude-to-IM')) this.botKind = 'claude';
+        } catch { /* best effort */ }
+      }
       // Also record app_id-based IDs if available
       if (botData?.bot?.bot_id) {
         this.botIds.add(botData.bot.bot_id);
@@ -1464,9 +1494,34 @@ export class FeishuAdapter extends BaseChannelAdapter {
     });
   }
 
+  /**
+   * [P3] Check if the message explicitly addresses THIS bot via a
+   * command prefix. We look at the raw text (mentions NOT counted) and
+   * return true iff the message starts with "/codex" (when this is the
+   * codex bridge) or "/claude" (when this is the claude bridge).
+   *
+   * This is what lets a user say "/codex 帮我写个 python 脚本" without @-ing,
+   * and have only the codex bot reply (the claude bridge sees the same
+   * message but its prefix check returns false).
+   */
+  private isAddressedByCommandPrefix(msg: FeishuMessageEventData['message']): boolean {
+    if (this.botKind == null) return false;
+    const raw = this.parseTextContent(msg.content) || '';
+    const trimmed = raw.trimStart();
+    if (this.botKind === 'codex') {
+      return /^\/codex(\b|$)/i.test(trimmed) || /^@codex\b/i.test(trimmed);
+    }
+    // 'claude'
+    return /^\/claude(\b|$)/i.test(trimmed) || /^@claude\b/i.test(trimmed);
+  }
+
   private stripMentionMarkers(text: string): string {
     // Feishu uses @_user_N placeholders for mentions
-    return text.replace(/@_user_\d+/g, '').trim();
+    let out = text.replace(/@_user_\d+/g, '').trim();
+    // Also strip a leading /codex or /claude command prefix (if present),
+    // so downstream the model sees the actual task, not the bot name.
+    out = out.replace(/^\s*\/(codex|claude)\s*/i, '').trim();
+    return out;
   }
 
   // ── Resource download ───────────────────────────────────────
@@ -1584,6 +1639,103 @@ export class FeishuAdapter extends BaseChannelAdapter {
         this.seenMessageIds.delete(key);
         removed++;
       }
+    }
+  }
+
+  // POLL-FALLBACK implementation ============================================
+  private async pollFallbackTick(): Promise<void> {
+    console.log("[feishu-adapter] [poll-fallback] tick fired restClient=" + (this.restClient ? "yes" : "no") + " running=" + this.running + " chats=" + this.pollFallbackChats.length);
+    if (!this.restClient || !this.running) return;
+    const token = await this.getTenantAccessToken();
+    if (!token) return;
+    const domainSetting = getBridgeContext().store.getSetting("bridge_feishu_domain") || "feishu";
+    const baseUrl = domainSetting === "lark" ? "https://open.larksuite.com" : "https://open.feishu.cn";
+    const headerBearer = { "Authorization": "Bearer " + token };
+    const chats = this.pollFallbackChats;
+    for (const chatId of chats) {
+      try {
+        const url = baseUrl + "/open-apis/im/v1/messages?container_id_type=chat&container_id=" + encodeURIComponent(chatId) + "&start_time=" + Math.floor(this.pollFallbackLastTsMs / 1000) + "&page_size=20";
+        const resp = await fetch(url, { method: "GET", headers: headerBearer, signal: AbortSignal.timeout(8000) });
+        const json: any = await resp.json();
+        if (json.code !== 0) { console.warn("[feishu-adapter] [poll-fallback] list messages failed chat=" + chatId + " code=" + json.code + " msg=" + json.msg); continue; }
+        const items = (json && json.data && json.data.items) || [];
+        for (const m of items) {
+          if (!m || !m.message_id) continue;
+          if (m.sender && (m.sender.sender_type === "app" || m.sender.sender_type === "bot")) continue;
+          if (this.seenMessageIds.has(m.message_id)) continue;
+          const createMs = parseInt(m.create_time, 10) * 1000;
+          if (!Number.isFinite(createMs) || createMs < this.pollFallbackLastTsMs - 60000) continue;
+          const synthMentions: any[] = [];
+          if (this.botOpenId) {
+            synthMentions.push({ key: "@_user_0", id: { open_id: this.botOpenId }, name: "bot" });
+          }
+          const synthetic: any = {
+            sender: {
+              sender_id: {
+                open_id: (m.sender && (m.sender.id || m.sender.open_id)) || undefined,
+                user_id: m.sender && m.sender.user_id,
+                union_id: m.sender && m.sender.union_id,
+              },
+              sender_type: (m.sender && m.sender.sender_type) || "user",
+            },
+            message: {
+              message_id: m.message_id,
+              chat_id: m.chat_id || chatId,
+              chat_type: m.chat_type || (chatId.startsWith("oc_") ? "group" : "p2p"),
+              message_type: m.msg_type || "text",
+              content: (m.body && m.body.content) || JSON.stringify({ text: "" }),
+              create_time: m.create_time,
+              mentions: synthMentions,
+            },
+          };
+          console.log("[feishu-adapter] [poll-fallback] synthesized event message_id=" + m.message_id + " chat_id=" + synthetic.message.chat_id);
+          await this.handleIncomingEvent(synthetic);
+        }
+      } catch (err) {
+        console.warn("[feishu-adapter] [poll-fallback] tick error chat=" + chatId + ":", err instanceof Error ? err.message : err);
+      }
+    }
+    this.pollFallbackLastTsMs = Date.now() - 30 * 1000;
+  }
+
+  private startPollFallback(): void {
+    if (this.pollFallbackTimer) return;
+    const configured = (getBridgeContext().store.getSetting("bridge_feishu_poll_chats") || "").trim();
+    const defaultChat = "oc_d523dbe90e25f275d21693359f138fbf";
+    this.pollFallbackChats = configured ? configured.split(",").map((s: string) => s.trim()).filter(Boolean) : [defaultChat];
+    const intervalMs = parseInt(getBridgeContext().store.getSetting("bridge_feishu_poll_interval_ms") || "3000", 10);
+    this.pollFallbackLastTsMs = Date.now() - 5 * 60 * 1000;
+    console.log("[feishu-adapter] [poll-fallback] started (every " + intervalMs + "ms, chats=" + this.pollFallbackChats.join(",") + ")");
+    this.pollFallbackTimer = setInterval(() => { this.pollFallbackTick().catch(() => {}); }, intervalMs);
+    if (typeof this.pollFallbackTimer === "object" && this.pollFallbackTimer && typeof (this.pollFallbackTimer as any).unref === "function") { (this.pollFallbackTimer as any).unref(); }
+  }
+
+  private stopPollFallback(): void {
+    if (this.pollFallbackTimer) {
+      clearInterval(this.pollFallbackTimer);
+      this.pollFallbackTimer = null;
+      console.log("[feishu-adapter] [poll-fallback] stopped");
+    }
+  }
+
+  private installWsFrameHook(): void {
+    try {
+      const anyClient: any = this.wsClient as any;
+      const ws: any = anyClient && (anyClient.wsClient || anyClient._ws || anyClient.ws);
+      if (ws && typeof ws.on === "function") {
+        ws.on("message", (data: any) => {
+          try {
+            const buf = Buffer.isBuffer(data) ? data : Buffer.from(typeof data === "string" ? data : JSON.stringify(data));
+            const preview = buf.length > 200 ? buf.subarray(0, 200).toString("utf8") + "..." : buf.toString("utf8");
+            console.log("[feishu-adapter] [ws-frame] type=" + (buf.length > 0 ? buf[0] : 0) + " len=" + buf.length + " preview=" + preview);
+          } catch { /* ignore log errors */ }
+        });
+        console.log("[feishu-adapter] [ws-frame] hook installed");
+      } else {
+        console.log("[feishu-adapter] [ws-frame] could not locate ws handle (keys: " + Object.keys(anyClient || {}).join(",") + ")");
+      }
+    } catch (err) {
+      console.warn("[feishu-adapter] [ws-frame] hook install failed:", err instanceof Error ? err.message : err);
     }
   }
 }

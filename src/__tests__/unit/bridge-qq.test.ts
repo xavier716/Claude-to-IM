@@ -12,15 +12,15 @@
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { initBridgeContext } from '../../lib/bridge/context';
-import { deliver } from '../../lib/bridge/delivery-layer';
-import { forwardPermissionRequest } from '../../lib/bridge/permission-broker';
-import { PLATFORM_LIMITS } from '../../lib/bridge/types';
-import { nextMsgSeq } from '../../lib/bridge/adapters/qq-api';
-import { QQAdapter } from '../../lib/bridge/adapters/qq-adapter';
-import type { BaseChannelAdapter } from '../../lib/bridge/channel-adapter';
-import type { BridgeStore } from '../../lib/bridge/host';
-import type { OutboundMessage, SendResult } from '../../lib/bridge/types';
+import { initBridgeContext } from '../../lib/bridge/context.js';
+import { deliver } from '../../lib/bridge/delivery-layer.js';
+import { forwardPermissionRequest } from '../../lib/bridge/permission-broker.js';
+import { PLATFORM_LIMITS } from '../../lib/bridge/types.js';
+import { nextMsgSeq } from '../../lib/bridge/adapters/qq-api.js';
+import { QQAdapter } from '../../lib/bridge/adapters/qq-adapter.js';
+import type { BaseChannelAdapter } from '../../lib/bridge/channel-adapter.js';
+import type { BridgeStore } from '../../lib/bridge/host.js';
+import type { OutboundMessage, SendResult } from '../../lib/bridge/types.js';
 
 // ── Mock Store ──────────────────────────────────────────────
 
@@ -522,7 +522,7 @@ describe('bridge-manager - image download failure reply', () => {
 
   it('replies to user when image-only message fails download', async () => {
     // Import the real handleMessage from bridge-manager
-    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager.js');
 
     const sentMessages: OutboundMessage[] = [];
     const adapter = createMockQQAdapter({
@@ -547,7 +547,7 @@ describe('bridge-manager - image download failure reply', () => {
   });
 
   it('replies to user when non-image attachments fail download', async () => {
-    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager.js');
 
     const sentMessages: OutboundMessage[] = [];
     const adapter = createMockQQAdapter({
@@ -571,7 +571,7 @@ describe('bridge-manager - image download failure reply', () => {
   });
 
   it('replies to user when adapter provides a custom visible error', async () => {
-    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager.js');
 
     const sentMessages: OutboundMessage[] = [];
     const adapter = createMockQQAdapter({
@@ -600,7 +600,7 @@ describe('bridge-manager - image download failure reply', () => {
   });
 
   it('silently drops empty message without imageDownloadFailed flag', async () => {
-    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager.js');
 
     const sentMessages: OutboundMessage[] = [];
     const adapter = createMockQQAdapter({
@@ -656,7 +656,7 @@ describe('numeric shortcut permission replies', () => {
   });
 
   it('resolves single pending permission with "1" → allow (qq)', async () => {
-    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager.js');
 
     // Insert a pending permission link
     store.permLinks.set('perm-abc', {
@@ -688,7 +688,7 @@ describe('numeric shortcut permission replies', () => {
   });
 
   it('resolves single pending permission with "2" → allow_session (qq)', async () => {
-    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager.js');
 
     store.permLinks.set('perm-def', {
       permissionRequestId: 'perm-def',
@@ -719,7 +719,7 @@ describe('numeric shortcut permission replies', () => {
   });
 
   it('resolves single pending permission with "3" → deny (qq)', async () => {
-    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager.js');
 
     store.permLinks.set('perm-ghi', {
       permissionRequestId: 'perm-ghi',
@@ -750,7 +750,7 @@ describe('numeric shortcut permission replies', () => {
   });
 
   it('handles fullwidth digit ２ via NFKC normalization', async () => {
-    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager.js');
 
     store.permLinks.set('perm-fw', {
       permissionRequestId: 'perm-fw',
@@ -781,7 +781,7 @@ describe('numeric shortcut permission replies', () => {
   });
 
   it('handles digit with zero-width characters', async () => {
-    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager.js');
 
     store.permLinks.set('perm-zw', {
       permissionRequestId: 'perm-zw',
@@ -822,7 +822,7 @@ describe('numeric shortcut permission replies', () => {
   });
 
   it('hints user to use /perm when multiple pending permissions', async () => {
-    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager.js');
 
     store.permLinks.set('perm-1', {
       permissionRequestId: 'perm-1',
@@ -880,7 +880,7 @@ describe('numeric shortcut permission replies', () => {
   });
 
   it('old /perm command still works alongside numeric shortcuts', async () => {
-    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager.js');
 
     store.permLinks.set('perm-compat', {
       permissionRequestId: 'perm-compat',
@@ -914,31 +914,31 @@ describe('numeric shortcut permission replies', () => {
 
 describe('bridge-manager - computeSdkSessionUpdate', () => {
   it('saves sdkSessionId when no error', async () => {
-    const { computeSdkSessionUpdate } = await import('../../lib/bridge/bridge-manager');
+    const { computeSdkSessionUpdate } = await import('../../lib/bridge/bridge-manager.js');
     const result = computeSdkSessionUpdate('new-sdk-123', false);
     assert.equal(result, 'new-sdk-123');
   });
 
   it('clears sdkSessionId on error even when sdkSessionId is present', async () => {
-    const { computeSdkSessionUpdate } = await import('../../lib/bridge/bridge-manager');
+    const { computeSdkSessionUpdate } = await import('../../lib/bridge/bridge-manager.js');
     const result = computeSdkSessionUpdate('new-sdk-123', true);
     assert.equal(result, '', 'Error with SDK ID: should clear');
   });
 
   it('clears sdkSessionId on error even without sdkSessionId', async () => {
-    const { computeSdkSessionUpdate } = await import('../../lib/bridge/bridge-manager');
+    const { computeSdkSessionUpdate } = await import('../../lib/bridge/bridge-manager.js');
     const result = computeSdkSessionUpdate(null, true);
     assert.equal(result, '', 'Error without SDK ID: should clear');
   });
 
   it('returns null (no update) when no error and no sdkSessionId', async () => {
-    const { computeSdkSessionUpdate } = await import('../../lib/bridge/bridge-manager');
+    const { computeSdkSessionUpdate } = await import('../../lib/bridge/bridge-manager.js');
     const result = computeSdkSessionUpdate(null, false);
     assert.equal(result, null, 'No error and no SDK ID: no update needed');
   });
 
   it('returns null for empty string sdkSessionId without error', async () => {
-    const { computeSdkSessionUpdate } = await import('../../lib/bridge/bridge-manager');
+    const { computeSdkSessionUpdate } = await import('../../lib/bridge/bridge-manager.js');
     const result = computeSdkSessionUpdate('', false);
     assert.equal(result, null, 'Empty SDK ID without error: no update needed');
   });

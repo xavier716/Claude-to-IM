@@ -1,4 +1,4 @@
-import type { ToolCallInfo } from '../types.js';
+﻿import type { ToolCallInfo } from '../types.js';
 
 /**
  * Feishu-specific Markdown processing.
@@ -127,6 +127,44 @@ export function buildStreamingContent(text: string, tools: ToolCallInfo[]): stri
     content = content ? `${content}\n\n${toolMd}` : toolMd;
   }
   return content || '💭 Thinking...';
+}
+
+/**
+ * Build a streaming card JSON (schema 2.0) with the current text content and a
+ * stream sequence footer. This is used by cardKitStreamContent to PATCH the
+ * existing card message - the content must be in v2 schema to be compatible
+ * with the card that was created via CardKit v2 (POST /cardkit/v1/cards).
+ */
+export function buildStreamingCardJson(
+  text: string,
+  tools: ToolCallInfo[],
+  sequence: number,
+): string {
+  let content = text || '';
+  const toolMd = buildToolProgressMarkdown(tools);
+  if (toolMd) {
+    content = content ? `${content}\n\n${toolMd}` : toolMd;
+  }
+  if (!content) {
+    content = '💭 Thinking...';
+  }
+  return JSON.stringify({
+    schema: '2.0',
+    config: { wide_screen_mode: true, streaming_mode: true },
+    body: {
+      elements: [
+        { tag: 'markdown', content, text_align: 'left', text_size: 'normal' },
+        { tag: 'hr' },
+        {
+          tag: 'div',
+          text: {
+            tag: 'plain_text',
+            content: `⏳ Stream sequence: ${sequence} • ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`,
+          },
+        },
+      ],
+    },
+  });
 }
 
 /**
